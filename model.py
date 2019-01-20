@@ -1,8 +1,10 @@
 import csv
 import cv2
 import numpy as np
+import os.path
 from sklearn.utils import shuffle
 from sklearn.model_selection import train_test_split
+from keras.callbacks import EarlyStopping, ModelCheckpoint
 lines = []
 
 #load csv file
@@ -20,7 +22,27 @@ training_data_csv_lines, validation_data_csv_lines = train_test_split(lines, tes
 print("size of input training data:" + str(len(training_data_csv_lines)))
 print("size of input validation data:" + str(len(validation_data_csv_lines)))
 
-batch_size = 32
+lap2_lines=[]
+## load self uploaded-images for lap2
+with open('/home/workspace/lap2_images/lap2_videos/driving_log.csv') as csvfile:
+    reader = csv.reader(csvfile)
+    for line in reader:
+        lap2_lines.append(line)
+
+
+#split data into training and validation set
+training_data_csv_lines_lap2, validation_data_csv_lines_lap2 = train_test_split(lap2_lines, test_size = 0.2)
+print("size of input training data for lap2:" + str(len(training_data_csv_lines_lap2)))
+print("size of input validation data for lap2:" + str(len(validation_data_csv_lines_lap2)))
+
+merged_training_data_csv_lines= training_data_csv_lines + training_data_csv_lines_lap2
+merged_validation_data_csv_lines = validation_data_csv_lines + validation_data_csv_lines_lap2
+
+
+print("size of total input training data for lap1 + lap2:" + str(len(merged_training_data_csv_lines)))
+print("size of total input validation data for lap1 + lap2:" + str(len(merged_validation_data_csv_lines)))
+
+batchSize = 64
 #crop and resize also change color space
 def change_color(image):
     #crop_image = image[80:140, :]
@@ -29,21 +51,32 @@ def change_color(image):
     return image
 
 #generate processed images for training and validation data set
-def image_generator(samples, batch_size=16):
+def image_generator(samples, data1_dir, data2_dir, batch_size=16):
     num_samples = len(samples)
     while 1: # Loop forever so the generator never terminates
         data = shuffle(samples)
         for offset in range(0, num_samples, batch_size):
             images = []
             angles = []
+            center_img = None
+            left_img = None
+            right_img = None
             if offset+ batch_size < len(data):
                 batch_samples = data[offset: offset + batch_size]
                 for line in batch_samples:
-                    center_img = cv2.imread('/opt/carnd_p3/data/' + line[0].strip())
+                    if os.path.isfile(data1_dir + line[0].strip()) :
+                        center_img = cv2.imread(data1_dir + line[0].strip())
+                    elif os.path.isfile(data2_dir+'/IMG/' + line[0].strip().split('/')[-1]) :
+                        center_img = cv2.imread(data2_dir+'/IMG/' + line[0].strip().split('/')[-1])
                     if center_img is not None :
+                        steering_angle = None
+                        try:
+                            steering_angle = float(line[3].strip())
+                        except ValueError:
+                            print(line[3].strip() + " is Not a float")
+                            continue
                         # print(center_img.shape)
                         center_img = change_color(center_img)
-                        steering_angle = float(line[3].strip())
                         # appending original image
                         images.append(center_img)
                         angles.append(steering_angle)
@@ -53,7 +86,10 @@ def image_generator(samples, batch_size=16):
                         angles.append(-steering_angle)
 
                     # appending left camera image
-                    left_img = cv2.imread('/opt/carnd_p3/data/' + line[1].strip())
+                    if os.path.isfile(data1_dir + line[1].strip()) :
+                        left_img = cv2.imread(data1_dir + line[1].strip())
+                    elif os.path.isfile(data2_dir+'/IMG/' + line[1].strip().split('/')[-1]) :
+                        left_img = cv2.imread(data2_dir+'/IMG/' + line[0].strip().split('/')[-1])
                     if left_img is not None :
                         # print(left_img.shape)
                         left_img = change_color(left_img)
@@ -61,7 +97,10 @@ def image_generator(samples, batch_size=16):
                         angles.append(steering_angle + 0.2)
 
                     # appending right camera image and steering angle with offset
-                    right_img = cv2.imread('/opt/carnd_p3/data/' + line[2].strip())
+                    if os.path.isfile(data1_dir + line[2].strip()) :
+                        right_img = cv2.imread(data1_dir + line[2].strip())
+                    elif os.path.isfile(data2_dir+'/IMG/' + line[2].strip().split('/')[-1]) :
+                        right_img = cv2.imread(data2_dir+'/IMG/' + line[0].strip().split('/')[-1])
                     if right_img is not None :
                         right_img = change_color(right_img)
                         images.append(right_img)
@@ -94,7 +133,7 @@ kernel_size = (3, 3)
 model.add(Convolution2D(64, kernel_size, padding='same', activation = 'elu'))
 model.add(Convolution2D(64, kernel_size, padding='same', activation = 'elu'))
 model.add(Dropout(0.5))
-#model.add(MaxPooling2D((2,2)))
+model.add(MaxPooling2D((2,2)))
 model.add(Flatten())
 model.add(Dense(100))
 model.add(Dense(50))
@@ -104,13 +143,24 @@ model.add(Dense(1))
 #compiling and running the model
 model.compile(loss='mse', optimizer='adam')
 
-model.fit_generator(image_generator(training_data_csv_lines, batch_size),
-                    steps_per_epoch = int(len(training_data_csv_lines)/batch_size) -1,
+# Train Keras model, saving the model whenever improvements are made and stopping if loss does not improve.
+early_stopping = EarlyStopping(monitor='val_loss', min_delta=0.0, patience=2)
+checkpointer = ModelCheckpoint(filepath='./model-{val_loss:.5f}.h5', verbose=1, save_best_only=True)
+
+model.fit_generator(image_generator(merged_training_data_csv_lines,
+                                    data1_dir='/opt/carnd_p3/data/',
+                                    data2_dir='/home/workspace/lap2_images/lap2_videos/',
+                                    batch_size = batchSize),
+                    steps_per_epoch = int(len(merged_training_data_csv_lines)/batchSize) -1,
                     #nb_epoch = 2,
                     epochs= 5,
                     verbose=1,
-                    validation_data=image_generator(validation_data_csv_lines,batch_size),
-                    validation_steps=int(len(validation_data_csv_lines)/batch_size) -1 )
+                    validation_data=image_generator(merged_validation_data_csv_lines,
+                                                    data1_dir='/opt/carnd_p3/data/',
+                                                    data2_dir='/home/workspace/lap2_images/lap2_videos/',
+                                                    batch_size = batchSize),
+                    validation_steps=int(len(merged_validation_data_csv_lines)/batchSize) -1,
+                    callbacks=[early_stopping, checkpointer])
 
 #saving the model
-model.save('model.h5')
+model.save('model-2.h5')
